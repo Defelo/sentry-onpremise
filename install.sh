@@ -4,7 +4,7 @@ set -e
 # With a tip o' the hat to https://unix.stackexchange.com/a/79077
 set -a && . ./.env && set +a
 
-dc="docker-compose --no-ansi"
+dc="sudo docker-compose --no-ansi"
 dcr="$dc run --rm"
 
 # Thanks to https://unix.stackexchange.com/a/145654/108960
@@ -50,9 +50,9 @@ trap_with_arg cleanup ERR INT TERM EXIT
 
 echo "Checking minimum requirements..."
 
-DOCKER_VERSION=$(docker version --format '{{.Server.Version}}')
+DOCKER_VERSION=$(sudo docker version --format '{{.Server.Version}}')
 COMPOSE_VERSION=$($dc --version | sed 's/docker-compose version \(.\{1,\}\),.*/\1/')
-RAM_AVAILABLE_IN_DOCKER=$(docker run --rm busybox free -m 2>/dev/null | awk '/Mem/ {print $2}');
+RAM_AVAILABLE_IN_DOCKER=$(sudo docker run --rm busybox free -m 2>/dev/null | awk '/Mem/ {print $2}');
 
 # Compare dot-separated strings - function below is inspired by https://stackoverflow.com/a/37939589/808368
 function ver () { echo "$@" | awk -F. '{ printf("%d%03d%03d", $1,$2,$3); }'; }
@@ -84,26 +84,15 @@ fi
 
 #SSE4.2 required by Clickhouse (https://clickhouse.yandex/docs/en/operations/requirements/)
 # On KVM, cpuinfo could falsely not report SSE 4.2 support, so skip the check. https://github.com/ClickHouse/ClickHouse/issues/20#issuecomment-226849297
-IS_KVM=$(docker run --rm busybox grep -c 'Common KVM processor' /proc/cpuinfo || :)
+IS_KVM=$(sudo docker run --rm busybox grep -c 'Common KVM processor' /proc/cpuinfo || :)
 if (($IS_KVM == 0)); then
-  SUPPORTS_SSE42=$(docker run --rm busybox grep -c sse4_2 /proc/cpuinfo || :)
+  SUPPORTS_SSE42=$(sudo docker run --rm busybox grep -c sse4_2 /proc/cpuinfo || :)
   if (($SUPPORTS_SSE42 == 0)); then
     echo "FAIL: The CPU your machine is running on does not support the SSE 4.2 instruction set, which is required for one of the services Sentry uses (Clickhouse). See https://git.io/JvLDt for more info."
     exit 1
   fi
 fi
 
-echo ""
-echo "Creating volumes for persistent storage..."
-echo "Created $(docker volume create --name=sentry-data)."
-echo "Created $(docker volume create --name=sentry-postgres)."
-echo "Created $(docker volume create --name=sentry-redis)."
-echo "Created $(docker volume create --name=sentry-zookeeper)."
-echo "Created $(docker volume create --name=sentry-kafka)."
-echo "Created $(docker volume create --name=sentry-clickhouse)."
-echo "Created $(docker volume create --name=sentry-symbolicator)."
-
-echo ""
 ensure_file_from_example $SENTRY_CONFIG_PY
 ensure_file_from_example $SENTRY_CONFIG_YML
 ensure_file_from_example $SENTRY_EXTRA_REQUIREMENTS
@@ -173,7 +162,7 @@ echo ""
 $dc pull -q --ignore-pull-failures 2>&1 | grep -v -- -onpremise-local || true
 
 # We may not have the set image on the repo (local images) so allow fails
-docker pull $SENTRY_IMAGE || true;
+sudo docker pull $SENTRY_IMAGE || true;
 
 echo ""
 echo "Building and tagging Docker images..."
@@ -234,26 +223,26 @@ echo "Bootstrapping and migrating Snuba..."
 $dcr snuba-api bootstrap --force
 echo ""
 
-# Very naively check whether there's an existing sentry-postgres volume and the PG version in it
-if [[ $(docker volume ls -q --filter name=sentry-postgres) && $(docker run --rm -v sentry-postgres:/db busybox cat /db/PG_VERSION 2>/dev/null) == "9.5" ]]; then
-    docker volume rm sentry-postgres-new || true
-    # If this is Postgres 9.5 data, start upgrading it to 9.6 in a new volume
-    docker run --rm \
-    -v sentry-postgres:/var/lib/postgresql/9.5/data \
-    -v sentry-postgres-new:/var/lib/postgresql/9.6/data \
-    tianon/postgres-upgrade:9.5-to-9.6
-
-    # Get rid of the old volume as we'll rename the new one to that
-    docker volume rm sentry-postgres
-    docker volume create --name sentry-postgres
-    # There's no rename volume in Docker so copy the contents from old to new name
-    # Also append the `host all all all trust` line as `tianon/postgres-upgrade:9.5-to-9.6`
-    # doesn't do that automatically.
-    docker run --rm -v sentry-postgres-new:/from -v sentry-postgres:/to alpine ash -c \
-     "cd /from ; cp -av . /to ; echo 'host all all all trust' >> /to/pg_hba.conf"
-    # Finally, remove the new old volume as we are all in sentry-postgres now
-    docker volume rm sentry-postgres-new
-fi
+# # Very naively check whether there's an existing sentry-postgres volume and the PG version in it
+# if [[ $(docker volume ls -q --filter name=sentry-postgres) && $(docker run --rm -v sentry-postgres:/db busybox cat /db/PG_VERSION 2>/dev/null) == "9.5" ]]; then
+#     docker volume rm sentry-postgres-new || true
+#     # If this is Postgres 9.5 data, start upgrading it to 9.6 in a new volume
+#     docker run --rm \
+#     -v sentry-postgres:/var/lib/postgresql/9.5/data \
+#     -v sentry-postgres-new:/var/lib/postgresql/9.6/data \
+#     tianon/postgres-upgrade:9.5-to-9.6
+# 
+#     # Get rid of the old volume as we'll rename the new one to that
+#     docker volume rm sentry-postgres
+#     docker volume create --name sentry-postgres
+#     # There's no rename volume in Docker so copy the contents from old to new name
+#     # Also append the `host all all all trust` line as `tianon/postgres-upgrade:9.5-to-9.6`
+#     # doesn't do that automatically.
+#     docker run --rm -v sentry-postgres-new:/from -v sentry-postgres:/to alpine ash -c \
+#      "cd /from ; cp -av . /to ; echo 'host all all all trust' >> /to/pg_hba.conf"
+#     # Finally, remove the new old volume as we are all in sentry-postgres now
+#     docker volume rm sentry-postgres-new
+# fi
 
 echo ""
 echo "Setting up database..."
@@ -270,14 +259,14 @@ else
 fi
 
 
-SENTRY_DATA_NEEDS_MIGRATION=$(docker run --rm -v sentry-data:/data alpine ash -c "[ ! -d '/data/files' ] && ls -A1x /data | wc -l || true")
-if [ "$SENTRY_DATA_NEEDS_MIGRATION" ]; then
-  echo "Migrating file storage..."
-  # Use the web (Sentry) image so the file owners are kept as sentry:sentry
-  # The `\"` escape pattern is to make this compatible w/ Git Bash on Windows. See #329.
-  $dcr --entrypoint \"/bin/bash\" web -c \
-    "mkdir -p /tmp/files; mv /data/* /tmp/files/; mv /tmp/files /data/files; chown -R sentry:sentry /data"
-fi
+# SENTRY_DATA_NEEDS_MIGRATION=$(docker run --rm -v sentry-data:/data alpine ash -c "[ ! -d '/data/files' ] && ls -A1x /data | wc -l || true")
+# if [ "$SENTRY_DATA_NEEDS_MIGRATION" ]; then
+#   echo "Migrating file storage..."
+#   # Use the web (Sentry) image so the file owners are kept as sentry:sentry
+#   # The `\"` escape pattern is to make this compatible w/ Git Bash on Windows. See #329.
+#   $dcr --entrypoint \"/bin/bash\" web -c \
+#     "mkdir -p /tmp/files; mv /data/* /tmp/files/; mv /tmp/files /data/files; chown -R sentry:sentry /data"
+# fi
 
 
 if [ ! -f "$RELAY_CREDENTIALS_JSON" ]; then
